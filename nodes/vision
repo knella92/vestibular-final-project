@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+
+'''
+High level PD controller that takes as input the position of the ball on the board and outputs deisred angles of the board.
+
+PUBLISHERS:
+
+  + ball_pose (Ball_pose)
+    ~   Publishes current ball position.
+
+SERVICES:
+  
+  + line_follow (Empty)
+    ~   Follows a drawn line from start point to end point
+
+  + maze_follow (Empty)
+    ~   Follows a drawn maze from start point to end point
+
+PARAMETERS
+
+  + none
+'''
+
+import pyrealsense2 as rs
+import numpy as np
+import rospy
+from std_srvs.srv import Empty, EmptyResponse
+from matplotlib import pyplot as plt
+from maze_solve import Solver
+from std_msgs.msg import Int8MultiArray
+from geometry_msgs.msg import Twist, Vector3
+from tf_conversions import transformations
+import tf2_ros
+import geometry_msgs.msg
+from balance_board.msg import Ball_pose, Path_map
+import cv2
+import modern_robotics as mr
+import time
+import argparse
+from balance_board.srv import Map_path
+from balance_board.srv import Trajectory, TrajectoryRequest
+
+
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+#from pupil_apriltags import Detector
+
+class Comp_vis:
+    def __init__(self):
+        '''
+        The initiation function of the computer vision. Initiates subscribers and variables
+        INPUTS:
+            Self - class variables
+        OUTPUTS:
+            none
+        '''
+        self.r=rospy.Rate(60)
+        self.pose_pub = rospy.Publisher("ball_pose",Ball_pose, queue_size=10)
+        self.follow_line = rospy.Service("maze_follow",Empty,self.map_follow_cb)
+        self.new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        self.__line_follow = rospy.Service("line_follow",Empty,self.line_follow)
+        self.maze_soln = np.zeros((480, 640))
+
+
+        # self.lower_orng = np.array([3,233,174])
+        # self.upper_orng = np.array([27,255,255])
+        self.lower_orng = np.array([11,145,131]) ### ball
+        self.upper_orng = np.array([37,255,227])
+
+        # self.lower_purple = np.array([114,20,90]) #### line
+        # self.upper_purple = np.array([135,113,189])
+        self.lower_purple = np.array([117,30,54]) #### line
+        self.upper_purple = np.array([142,189,195])
+
+        self.lower_green = np.array([75,39,104]) ### border
+        self.upper_green = np.array([94,254,167])
+
+        self.lower_pink = np.array([157,34,70]) ### waypoint 2
+        self.upper_pink = np.array([180,255,169])
+
+        # self.lower_bluemark = np.array([99,138,78]) ### waypoint 1
+        # self.upper_bluemark = np.array([110,255,215])
+        self.lower_bluemark = np.array([100,61,89]) ### waypoint 1
+        self.upper_bluemark = np.array([112,219,213])
+
+        # self.map = Map_path()
+
+        # # self.map.layout.dim[0].size = 480
+        # # self.map.layout.dim[0].label = "height"
+        # # self.map.layout.dim[0].stride = 640*480
+
+        # # self.map.layout.dim[1].size = 640
+        # # self.map.layout.dim[1].label = "width"
+        # # self.map.layout.dim[1].stride = 640
+
+        self.ball_detection()
+
+    
+    def map_follow_cb(self,req):
+        '''
+        Maps the maze mask in Maze mode. It conducts the maze solver algorithm and outputs the trajectory for the ball to follow.
+        INPUTS:
+            self.path ~ the mask for the purple + blue + pink pixels
+            self.maze_start ~ pixel coordinates for the blue start waypoint
+            self.maze_end ~ pixel coordinates for the pink end waypoint
+        OUTPUTS:
+            self.new_traj ~ the trajectory of the ball to follow
+        '''
+        self.cost = 1
+        self.maze = np.array(self.path)
+        print("index")
+        plt.spy(self.maze)
+        plt.show()
+        print(self.maze)
+        print(self.maze_start)
+        print(self.maze_end)
+        kern = np.ones((10,10), np.uint8)
+        self.maze = np.where(self.maze > 0, 1, self.maze)
+        dil_maze = cv2.dilate(self.maze, kern, iterations=1)
+        self.solver = Solver(dil_maze)
+        (x_path, y_path) = self.solver.solve_maze(self.maze_start, self.maze_end)
+        self.maze_soln = self.solver.path
+        print("astar returned")
+        # np.savetxt("/home/daelan/test_values.txt", self.maze, delimiter=",")
+
+        traj = TrajectoryRequest()
+        traj.x_list = x_path
+        traj.y_list = y_path
+        traj.clear_queue = True
+        traj.rate = 20
+
+        self.new_traj.call(traj)
+
+        return EmptyResponse()
+
+    def line_follow(self,req):
+        '''
+        Service callback to map out the "maze" in line following mode. It conducts the maze solver algorithm and outputs the trajectory for the ball to follow.
+        INPUTS:
+            self.path ~ the mask for the purple + blue + pink pixels
+            self.maze_start ~ pixel coordinates for the blue start waypoint
+            self.maze_end ~ pixel coordinates for the pink end waypoint
+        OUTPUTS:
+            self.new_traj ~ the trajectory of the ball to follow
+        '''
+        print("Line Following")
+        self.cost = 1
+        self.maze = np.array(self.line_path)
+        print("index")
+        plt.spy(self.maze)
+        plt.show()
+        print(self.maze)
+        print(self.maze_start)
+        print(self.maze_end)
+        self.maze = np.where(self.maze > 0, 1, self.maze)
+        self.solver = Solver(self.maze)
+        (x_path, y_path) = self.solver.solve_follow(self.maze_start, self.maze_end)
+        self.maze_soln = self.solver.path
+        print("astar returned")
+        # np.savetxt("/home/daelan/test_values.txt", self.maze, delimiter=",")
+
+        traj = TrajectoryRequest()
+        traj.x_list = x_path
+        traj.y_list = y_path
+        traj.clear_queue = True
+        traj.rate = 20
+
+        self.new_traj.call(traj)
+
+        return EmptyResponse()
+
+
+    def on_low_H_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_H
+        self.high_H
+        self.low_H = val
+        self.low_H = min(self.high_H-1, self.low_H)
+        cv2.setTrackbarPos(self.low_H_name, self.window_detection_name, self.low_H)
+    def on_high_H_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_H
+        self.high_H
+        self.high_H = val
+        self.high_H = max(self.high_H, self.low_H+1)
+        cv2.setTrackbarPos(self.high_H_name, self.window_detection_name, self.high_H)
+    def on_low_S_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_S
+        self.high_S
+        self.low_S = val
+        self.low_S = min(self.high_S-1, self.low_S)
+        cv2.setTrackbarPos(self.low_S_name, self.window_detection_name, self.low_S)
+    def on_high_S_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_S
+        self.high_S
+        self.high_S = val
+        self.high_S = max(self.high_S, self.low_S+1)
+        cv2.setTrackbarPos(self.high_S_name, self.window_detection_name, self.high_S)
+    def on_low_V_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_V
+        self.high_V
+        self.low_V = val
+        self.low_V = min(self.high_V-1, self.low_V)
+        cv2.setTrackbarPos(self.low_V_name, self.window_detection_name, self.low_V)
+    def on_high_V_thresh_trackbar(self,val):
+        '''
+        The threshold trackbar functions to set the trackbar values for finding HSV color thresholds 
+        INPUTS:
+        none
+        OUTPUTS:
+        self.low_H ~ low threshold value
+        self.high_H ~ high threshold value
+        '''
+        self.low_V
+        self.high_V
+        self.high_V = val
+        self.high_V = max(self.high_V, self.low_V+1)
+        cv2.setTrackbarPos(self.high_V_name, self.window_detection_name, self.high_V)
+
+    
+    def ball_detection(self):
+        '''
+        Main CV pipeline for image processing. 
+        Uses masks, contours, contour moments, and pixel coordinates to populate and publish the current ball coordinates.
+        Populates and publishes the 3 latest ball positions onto Ball_pose()
+
+        Displays the realsense images with utilized contours drawn on the images.
+        Displays HSV threshold trackbar image for finding color thresholds.
+        Populates the masks to prepare for the maze service callbacks.
+        
+        INPUTS:
+            none
+        OUTPUTS:
+            poses (Ball_pose())~ publishes latest 3 ball positions and waypoint position.
+        '''
+
+        poses = Ball_pose()
+
+        self.max_value = 255
+        self.max_value_H = 360//2
+        self.low_H = 0
+        self.low_S = 0
+        self.low_V = 0
+        self.high_H = self.max_value_H
+        self.high_S = self.max_value
+        self.high_V = self.max_value
+        self.window_capture_name = 'Video Capture'
+        self.window_detection_name = 'Object Detection'
+        self.low_H_name = 'Low H'
+        self.low_S_name = 'Low S'
+        self.low_V_name = 'Low V'
+        self.high_H_name = 'High H'
+        self.high_S_name = 'High S'
+        self.high_V_name = 'High V'
+
+        #### Parameter variable inits
+        self.line_path = []
+        self.path=[]
+        self.waypoints=[]
+        self.border = []
+        self.maze_start = []
+        self.maze_end = []
+        
+
+        cv2.namedWindow(self.window_capture_name)
+        cv2.namedWindow(self.window_detection_name)
+        cv2.createTrackbar(self.low_H_name, self.window_detection_name , self.low_H, self.max_value_H, self.on_low_H_thresh_trackbar)
+        cv2.createTrackbar(self.high_H_name, self.window_detection_name , self.high_H, self.max_value_H, self.on_high_H_thresh_trackbar)
+        cv2.createTrackbar(self.low_S_name, self.window_detection_name , self.low_S, self.max_value, self.on_low_S_thresh_trackbar)
+        cv2.createTrackbar(self.high_S_name, self.window_detection_name , self.high_S, self.max_value, self.on_high_S_thresh_trackbar)
+        cv2.createTrackbar(self.low_V_name, self.window_detection_name , self.low_V, self.max_value, self.on_low_V_thresh_trackbar)
+        cv2.createTrackbar(self.high_V_name, self.window_detection_name , self.high_V, self.max_value, self.on_high_V_thresh_trackbar)
+        # #Alignment inits
+        pipeline = rs.pipeline()
+        config = rs.config()
+
+        pipeline_wrapper = rs.pipeline_wrapper(pipeline)
+        pipeline_profile = config.resolve(pipeline_wrapper)
+        device = pipeline_profile.get_device()
+        device_product_line = str(device.get_info(rs.camera_info.product_line))
+        
+
+        found_rgb = False
+        for s in device.sensors:
+            if s.get_info(rs.camera_info.name) == 'RGB Camera':
+                found_rgb = True
+                break
+        if not found_rgb:
+            print("The demo requires Depth camera with Color sensor")
+            exit(0)
+
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+
+        if device_product_line == 'L500':
+            config.enable_stream(rs.stream.color, 960, 540, rs.format.bgr8, 30)
+        else:
+            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+
+
+        # Start streaming
+        profile = pipeline.start(config)
+        intr_profile = profile.get_stream(rs.stream.color)
+        intr = intr_profile.as_video_stream_profile().get_intrinsics()
+        # print(intr)
+        # Getting the depth sensor's depth scale (see rs-align example for explanation)
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_scale = depth_sensor.get_depth_scale()
+        # print("Depth Scale is: " , depth_scale)
+
+        # We will be removing the background of objects more than
+        #  clipping_distance_in_meters meters away
+        clipping_distance_in_meters = 100 #1 meter
+        clipping_distance = clipping_distance_in_meters / depth_scale
+
+
+        # Create an align object
+        align_to = rs.stream.color
+        align = rs.align(align_to)
+        
+        iteration = 0
+
+
+        # Streaming loop
+        try:
+            while True:
+                # Get frameset of color and depth
+                frames = pipeline.wait_for_frames()
+                # frames.get_depth_frame() is a 640x360 depth image
+
+                # print("checkpoint 1")
+                # Align the depth frame to color frame
+                aligned_frames = align.process(frames)
+
+                # Get aligned frames
+                aligned_depth_frame = aligned_frames.get_depth_frame() # aligned_depth_frame is a 640x480 depth image
+                color_frame = aligned_frames.get_color_frame()
+                # print("checkpoint 2")
+
+                # Validate that both frames are valid
+                if not aligned_depth_frame or not color_frame:
+                    continue
+
+                depth_image = np.asanyarray(aligned_depth_frame.get_data())
+                color_image = np.asanyarray(color_frame.get_data())
+                # print("checkpoint 3")
+
+                # Remove background - Set pixels further than clipping_distance to grey
+                grey_color = 153
+                depth_image_3d = np.dstack((depth_image,depth_image,depth_image)) #depth image is 1 channel, color is 3 channels
+                ######################
+                bg_removed = color_image
+                # bg_removed = np.where((depth_image_3d > clipping_distance) | (depth_image_3d <= 0), grey_color, color_image)
+
+                hsv = cv2.cvtColor(bg_removed, cv2.COLOR_BGR2HSV)
+                # print("checkpoint 4")
+                
+                frame_threshold = cv2.inRange(hsv, (self.low_H, self.low_S, self.low_V), (self.high_H, self.high_S, self.high_V))
+                # print("checkpoint 5")
+
+                # Threshold the HSV image each mask required for ball detection, maze detection, and waypoint detection
+                try:
+                    mask = cv2.inRange(hsv, self.lower_orng, self.upper_orng)
+                except:
+                    print("orange fail")
+                try:
+                    way_mask = cv2.inRange(hsv, self.lower_bluemark, self.upper_bluemark)
+                except:
+                    print("blue fail")
+                try:
+                    way2_mask = cv2.inRange(hsv, self.lower_pink, self.upper_pink)
+                except:
+                    print("pink fail")
+                try:
+                    border_mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
+                except:
+                    print("green fail")
+                try:
+                    path_mask = cv2.inRange(hsv, self.lower_purple, self.upper_purple)
+                except:
+                    print("purple fail")
+                
+                
+
+                ###########################
+
+                
+                # Bitwise-AND mask and original image
+                res = cv2.bitwise_and(bg_removed,bg_removed, mask= mask)
+                res_maze = cv2.bitwise_and(bg_removed,bg_removed, mask= way_mask+way2_mask+path_mask)
+                # cv2.imshow('frame',bg_removed)
+                # cv2.imshow('mask',mask)
+                # cv2.imshow('res',res)
+                cv2.imshow('maze',res_maze)
+                # print("checkpoint 6")
+
+                res2 = cv2.bitwise_and(bg_removed,bg_removed, mask= way_mask)
+                # cv2.imshow('waypoint',res2)
+                # print("checkpoint 7")
+                # print(frame_threshold)
+                cv2.imshow(self.window_detection_name, frame_threshold)
+                # cv2.imshow(self.window_detection_name)
+
+                # Setting all contours for each mask
+                contours, hierarchy = cv2.findContours(mask , cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                way_contours, way_hierarchy = cv2.findContours(way_mask , cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                way2_contours, way2_hierarchy = cv2.findContours(way2_mask , cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                border_contours, border_hierarchy = cv2.findContours(border_mask , cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                path_contours, path_hierarchy = cv2.findContours(path_mask , cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # print("trying maze...")
+                # try:
+                #     maze_path_contours, hierch = cv2.findContours(self.maze_soln, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                # except Exception as e:
+                #     print(e)
+                # #print(contours)
+                
+
+                ####################################### orange ball contour processing
+                # print("checkpoint 8")
+                try:
+                    
+                    try: # getting max volume contour
+                        c = max(contours,key=cv2.contourArea)
+                        #print(f"this is c = {c}")
+                    except:
+                        print("the issue is with c")
+                        c = c*0
+                    try: # getting moment of max contour
+                        M = cv2.moments(c)
+                    except:
+                        print("the issue is with moments")
+                    try: # getting center coordinate of contour
+                        cx = int(M['m10']/M['m00'])
+                        cy = int(M['m01']/M['m00'])
+                        center = (int(cx),int(cy))
+                    except:
+                        print("the issue is with cxcy")
+                    cv2.circle(bg_removed, center, 10,(0,0,255),-1) # place dot over centroid
+                    try: # draw a box around ball
+                        rect = cv2.minAreaRect(c)
+                        box = cv2.boxPoints(rect)
+                        box = np.int0(box)
+                        cv2.drawContours(bg_removed, [box],0,(0,0,255),2)
+                        ellipse = cv2.fitEllipse(c)
+                        cv2.ellipse(bg_removed,ellipse,(0,0,255),2)
+                    except:
+                        print("box or ellipse problem")
+                    try: # get depth of centroid
+                        depth = depth_image[cy][cx]
+                        #print(f"pix coords {cx},{cy}")
+                        # print(f"depth of centroid is {depth}")
+                    except:
+                        print("depth issue")
+                    try: # pixel to point coordnate
+                        ball_coord = rs.rs2_deproject_pixel_to_point(intr,[cx,cy],depth)
+                        # print(ball_coord)
+
+                    except:
+                        print("pixel to point issue")
+                except:
+                    print("sum ting wong")
+                cv2.drawContours(bg_removed, contours, -1, (51,153,255),3) #draw contours onto image
+
+                ##############################################  blue Waypoint 
+                try:
+                    try:# getting max volume contour
+                        way_c = max(way_contours,key=cv2.contourArea)
+                        #print(f"this is c = {c}")
+                    except:
+                        print("waypoint issue is with wayppoint contours")
+                        way_c = way_c*0
+                    try:# getting moment of max contour
+                        way_M = cv2.moments(way_c)
+                    except:
+                        print("waypoint issue is with moments")
+                    try: # getting center coordinate of contour
+                        way_cx = int(way_M['m10']/way_M['m00'])
+                        way_cy = int(way_M['m01']/way_M['m00'])
+                        way_center = (int(way_cx),int(way_cy))
+                    except:
+                        print("waypoint issue with cxcy")
+                    cv2.circle(bg_removed, way_center, 10,(0,0,255),-1)# place dot over centroid
+                    try:# get depth of centroid
+                        way_depth = depth_image[way_cy][way_cx]
+                        #print(f"pix coords {cx},{cy}")
+                        # print(f"waypoint depth of centroid is {way_depth}")
+                    except:
+                        print("waypoint depth issue")
+                    try: # pixel to point coordnate
+                        way_coord = rs.rs2_deproject_pixel_to_point(intr,[way_cx,way_cy],way_depth)
+                        # print(way_coord)
+
+                    except:
+                        print("waypoint pixel to point issue")
+                except:
+                    print("sum ting wong waypoints")
+                cv2.drawContours(bg_removed, way_contours, -1, (255,0,0),3)#draw contours onto image
+
+                ################################################################### pink waypoint 2
+                try:
+                    try:# getting max volume contour
+                        way2_c = max(way2_contours,key=cv2.contourArea)
+                        #print(f"this is c = {c}")
+                    except:
+                        print("waypoint issue is with wayppoint contours")
+                        way2_c = way2_c*0
+                    try:# getting moment of max contour
+                        way2_M = cv2.moments(way2_c)
+                    except:
+                        print("waypoint issue is with moments")
+                    try:# getting center coordinate of contour
+                        way2_cx = int(way2_M['m10']/way2_M['m00'])
+                        way2_cy = int(way2_M['m01']/way2_M['m00'])
+                        way2_center = (int(way2_cx),int(way2_cy))
+                    except:
+                        print("waypoint issue with cxcy")
+                    cv2.circle(bg_removed, way2_center, 10,(0,0,255),-1)# place dot over centroid
+                    try:# get depth of centroid
+                        way2_depth = depth_image[way2_cy][way2_cx]
+                        #print(f"pix coords {cx},{cy}")
+                        # print(f"waypoint depth of centroid is {way2_depth}")
+                    except:
+                        print("waypoint depth issue")
+                    try:# pixel to point coordnate
+                        way2_coord = rs.rs2_deproject_pixel_to_point(intr,[way2_cx,way2_cy],way2_depth)
+                        # print(way2_coord)
+
+                    except:
+                        print("waypoint pixel to point issue")
+                except:
+                    print("sum ting wong waypoint 2")
+                cv2.drawContours(bg_removed, way2_contours, -1, (255,0,255),3)#draw contours onto image
+
+
+                ################################################################### Green border
+                try:
+                    try:# getting max volume contour
+                        border_c = max(border_contours,key=cv2.contourArea)
+                        #print(f"this is c = {c}")
+                    except:
+                        print("waypoint issue is with wayppoint contours")
+                        border_c = border_c*0
+                except:
+                    print("sum ting wong waypoint 2")
+                cv2.drawContours(bg_removed, border_contours, -1, (0,204,0),3)#draw contours onto image
+
+
+                ################################################################### purple path
+                try:
+                    try:# getting max volume contour
+                        path_c = max(path_contours,key=cv2.contourArea)
+                        #print(f"this is c = {c}")
+                    except:
+                        print("waypoint issue is with wayppoint contours")
+                        path_c = path_c*0
+                except:
+                    print("sum ting wong waypoint 2")
+                cv2.drawContours(bg_removed, path_contours, -1, (255,0,127),3)#draw contours onto image
+
+                # dialtes the maze contour to fill in any unwanted gaps
+                try:
+                    kern = np.ones((5,5), np.uint8)
+                    path = cv2.dilate(self.maze_soln, kern, iterations=1)
+                    bg_removed[path > 0] = np.array([255,0,0], np.uint8)
+                except Exception as e:
+                    print(e)
+
+
+                ####################################### parameter zone
+                # print("loading parameters")
+                try: # loads all mask parameters for the maze functions
+                    self.line_path = path_mask + way_mask + way2_mask
+                    self.path=path_mask
+                    self.waypoints = [[way_cx,way_cy,way_depth],[way2_cx,way2_cy,way2_depth]]
+                    self.border = border_mask
+                    self.maze_start = [way_cx,way_cy]
+                    self.maze_end = [way2_cx,way2_cy]
+                except:
+                    print("Parameter fail!!!")
+                # print("loaded parameters")
+
+                
+                ###### populate publisher msg
+                try:
+                    poses.x3 = poses.x2
+                    poses.y3 = poses.y2
+                    poses.z3 = poses.z2
+                except:
+                    print("No x2 coords yet")
+                
+                try:
+                    poses.x2 = poses.x
+                    poses.y2 = poses.y
+                    poses.z2 = poses.z
+                except:
+                    print("No x coords yet")
+                
+                try:
+                    poses.ball_coord = ball_coord
+                except:
+                    print("ball coord no pub")
+                
+                try:
+                    poses.way_coord = way_coord
+                except:
+                    print("waypoint coord no pub")
+                
+                try: # ball coordinates
+                    # print(poses)
+
+                    poses.x = cx
+                    poses.y = cy
+                    poses.z = depth
+                    
+                    poses.x_way = way_cx
+                    poses.y_way = way_cy
+                    poses.z_way = way_depth
+
+                    # print("checkpoint pub")
+                    self.pose_pub.publish(poses)
+                except:
+                    print("pub failed")
+
+                iteration +=1
+
+                # Render images:
+                #   depth align to color on left
+                #   depth on right
+                depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
+                images = np.hstack((bg_removed, depth_colormap))
+
+                cv2.namedWindow('Align Example', cv2.WINDOW_NORMAL)
+                # cv2.imshow('Align Example', images)
+                cv2.imshow('Align Example', bg_removed)
+                key = cv2.waitKey(1)
+                # Press esc or 'q' to close the image window
+                if key & 0xFF == ord('q') or key == 27:
+                    cv2.destroyAllWindows()
+                    break
+        except:
+            print("first try fail")
+        finally:
+            pipeline.stop()
+
+
+if __name__=='__main__': # main run for node. inits node, runs class, and spins
+  '''
+  Your quintessential main function to run the class and init the node
+  INPUTS:
+      none
+  OUTPUTS:
+      Empty
+  '''
+  rospy.init_node('CV_vision')
+  Comp_vis()
+  rospy.spin()

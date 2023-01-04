@@ -1,0 +1,10 @@
+<launch>
+    <arg name="robot_ip" default="robot.franka.de"/>
+    <include file="$(find balance_board)/launch/pd_controller.launch"/>
+    <node name="trajectory_manager" pkg="balance_board" type="trajectory_manager">
+        <rosparam command="load" file="$(find balance_board)/config/trajmgr_params.yaml"/>
+    </node>
+    <node name="fake_franka" pkg="balance_board" type="fake_franka"/>
+    <test test-name="integration_test" pkg="balance_board" type="integration_test" />
+
+</launch>

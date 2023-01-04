@@ -1,0 +1,12 @@
+<?xml version="1.0" ?>
+<launch>
+    <node name="pos_control_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen"  args="--stopped pos_control"/>
+    <include file="$(find panda_moveit_config)/launch/panda_control_moveit_rviz.launch">
+        <arg name="launch_franka_control" value="false"/>
+    </include>
+    <node name="ros_control_interface" pkg="balance_board" type="ros_control_interface">
+        <rosparam command="load" file="$(find balance_board)/config/rci_params.yaml"/>
+    </node>
+    
+  <rosparam command="load" file="$(find balance_board)/config/controllers.yaml" />
+</launch>

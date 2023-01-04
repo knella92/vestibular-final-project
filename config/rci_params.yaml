@@ -1,0 +1,5 @@
+# params for the ros_control_interface
+joint_update_frequency: 100 #(Hz)
+min_lim: -0.78539816339 # minimum board angle limit
+max_lim: 0.78539816339 # maximum board angle limit
+ 

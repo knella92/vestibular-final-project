@@ -1,0 +1,8 @@
+# pd controller gains
+float64 kp # proportional gain
+float64 ki # integral gain
+float64 kd # derivative gain
+
+---
+
+float64 reply # response

@@ -1,0 +1,10 @@
+# new trajectory
+bool clear_queue # should new trejectory clear unreachd 
+bool repeat # shoudl the new trjectory repeat
+float64 rate # what rate should new waypoints be sent (set 0 to wait for each waypoint to converge)
+float64[] x_list # list of x coords
+float64[] y_list # list of y coords, must be of same length as x_list
+
+---
+
+bool ok # returns whether trajectory was valid

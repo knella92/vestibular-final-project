@@ -1,0 +1,90 @@
+#!/usr/bin/env python
+import unittest
+import balance_board
+import time
+import rospy
+from balance_board.srv import Gains, Trajectory, TrajectoryRequest
+from balance_board.msg import BoardPose, Ball_pose
+from std_srvs.srv import Empty, EmptyRequest
+from board_pid import BoardPid
+from controller_manager_msgs.srv import SwitchController
+
+
+class BalanceServTests(unittest.TestCase):
+
+    def test_callSetGains(self):
+        rospy.wait_for_service('set_gains', timeout=None)
+        set_gains = rospy.ServiceProxy("set_gains", Gains)
+        ec = set_gains(kp=0.001, ki= 0, kd=0.001)
+        self.assertEquals(ec.reply, 0.0)
+
+
+    def test_callNew_Traj_same_len(self):
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = False
+        traj.repeat = False
+        traj.rate = 0
+        traj.x_list = [0, 1, 2]
+        traj.y_list = [0, 1, 2]
+        reply = new_traj.call(traj)
+        self.assertEquals(reply.ok, True)
+
+    def test_callNew_Traj_diff_len(self):
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = False
+        traj.repeat = False
+        traj.rate = 0
+        traj.x_list = [0, 1]
+        traj.y_list = [0, 1, 2]
+        reply = new_traj.call(traj)
+        self.assertEquals(reply.ok, False)
+
+    def test_traj_manager_disable(self):
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [4]
+        traj.y_list = [5]
+        reply = new_traj.call(traj)
+        self.assertEqual(reply.ok, True)
+        target = rospy.wait_for_message("target", Ball_pose)
+        self.assertEquals(target.x_way, 350.0)
+        self.assertEquals(target.y_way, 350.0)
+
+    def test_traj_manager_enable_singleton_trajectory(self):
+        self.fake_switch = rospy.Service("controller_manager/switch_controller", SwitchController, self.fake_switch_cb)
+
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        rospy.wait_for_service('start', timeout=None)
+        start = rospy.ServiceProxy("start", Empty)
+        start.call(EmptyRequest())
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [4]
+        traj.y_list = [5]
+        reply = new_traj.call(traj)
+        self.assertEqual(reply.ok, True)
+        time.sleep(1)
+        target = rospy.wait_for_message("target", Ball_pose)
+        self.assertEquals(target.x_way, 54.0)
+        self.assertEquals(target.y_way, 55.0)
+    
+    def fake_switch_cb(self, msg):
+        return True
+
+
+if __name__== "__main__":
+    import rostest
+
+    rospy.init_node("integration_test")
+    rostest.rosrun(balance_board, 'balance_serv_tests', BalanceServTests)

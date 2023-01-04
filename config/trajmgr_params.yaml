@@ -1,0 +1,8 @@
+# params for the ros_control_interface
+update_frequency: 50 #(Hz)
+init_x: 300 # init target
+init_y: 300
+x_offset: 50 # offset to deal with camera errors
+y_offset: 50
+pos_tol: 10
+ 

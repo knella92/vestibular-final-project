@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+'''
+High level PD controller that takes as input the position of the ball on the board and outputs deisred angles of the board.
+
+PUBLISHERS:
+
+  + angle_updates (BoardPose)
+    ~   Publishes new target values for the angles of the board.
+
+SUBSCRIBERS
+
+  +  ball_pose (Ball_pose)
+    ~   The current position of the ball (published by vision node)
+
+  +  target (Ball_pose)
+    ~   The current target ball position (published by trajectory_manager)
+
+  +  rci_state (RobotState)
+    ~   The current enable state of the ros_control_interface (published by ros_control_interface
+
+SERVICES:
+  
+  + set_gains (Gains)
+    ~   Sets the gains for the board_pid objects in both dimensions
+
+PARAMETERS
+
+  + ~kp
+    ~ proportional gain
+
+  + ~ki
+    ~ integral gain
+
+  + ~kd
+    ~ derivative gain
+
+  + ~derivative_smoothing
+    ~ number of frames to average to smooth error derivative
+'''
+#imports
+import rospy
+from balance_board.msg import BoardPose,Ball_pose, RobotState
+from balance_board.srv import Gains
+from board_pid import BoardPid
+# import geometry_msgs.msg
+
+class PD:
+    def __init__(self):
+        '''
+        The initiation function of the PD_controller. Initiates subscribers and variables
+
+        INPUTS:
+            none
+        OUTPUTS:
+            none
+        '''
+
+        # inits publishers, subscribers services
+        self.angle_pub = rospy.Publisher('angle_updates', BoardPose, queue_size=10)
+        self.vision_system = rospy.Subscriber("ball_pose", Ball_pose, self.vision_callback)
+        self.target = rospy.Subscriber('target', Ball_pose, self.target_callback)
+        self.set_gains = rospy.Service('set_gains', Gains, self.set_gains_callback)
+        self.rci_state = rospy.Subscriber('rci_state', RobotState, self.rci_state_callback)
+
+
+        # init PID parameters
+        self.pos_kp = rospy.get_param("~kp")
+        self.pos_ki = rospy.get_param("~ki")
+        self.pos_kd = rospy.get_param("~kd")
+        self.frames_smoothing = rospy.get_param("~derivative_smoothing")
+
+        # init x and y PID objects
+        self.x_pid = BoardPid(
+            kp=self.pos_kp,
+            ki=self.pos_ki,
+            kd=self.pos_kd,
+            derivative_window = self.frames_smoothing,
+            target=0
+        )
+
+        self.y_pid = BoardPid(
+            kp=self.pos_kp,
+            ki=self.pos_ki,
+            kd=self.pos_kd,
+            derivative_window = self.frames_smoothing,
+            target=0
+        )
+
+    def vision_callback(self, msg):
+        '''
+        Updates ball position from new vision data, and publishes new angle target data
+
+        INPUTS:
+            msg (Ball_pose) ~ the new detected ball position
+
+        OUTPUTS:
+            none
+        '''
+
+        # inits new board pose message
+        pose = BoardPose()
+
+        # gets new angle values for the board from PID objects
+        pose.theta_x = self.x_pid.get(msg.x)
+        pose.theta_y = -self.y_pid.get(msg.y)
+
+        # publishes new joint angles to the rci
+        self.angle_pub.publish(pose)  
+    
+    def set_gains_callback(self, msg):
+        '''
+        Sets gains for PD objects
+
+        INPUTS:
+            msg (Gains) ~ the new set of gains
+            
+        OUTPUTS:
+            none
+        '''
+
+        self.x_pid.set_gains(kp=msg.kp, ki= msg.ki, kd=msg.kd)
+        self.y_pid.set_gains(kp=msg.kp, ki= msg.ki, kd=msg.kd)
+        return 0
+
+    def target_callback(self, msg):
+        '''
+        Sets new setpoint for PD objects
+
+        INPUTS:
+            msg (Ball_pose) ~ the new ball position target
+            
+        OUTPUTS:
+            none
+        '''
+        self.x_pid.set_target(msg.x_way)
+        self.y_pid.set_target(msg.y_way)
+
+    def rci_state_callback(self, msg):
+        '''
+        If integral gain is nonzero, prevents integral windup while robot is disabled.
+
+        INPUTS:
+            msg (RobotState) ~ the new robot state 
+            
+        OUTPUTS:
+            none
+        '''
+        if not msg.state:
+            self.x_pid.int = 0
+            self.y_pid.int = 0
+
+def main():
+    
+    rospy.init_node('pd_controller', anonymous=True)
+    controller = PD()
+    rospy.spin()
+
+if __name__ == '__main__':
+    try:
+        main()
+    except rospy.ROSInterruptException:
+        pass

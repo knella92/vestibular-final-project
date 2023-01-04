@@ -1,0 +1,8 @@
+# pack-refs with: peeled fully-peeled sorted 
+0715a4d71a0d2e165e0afa1c0598784b5df7ea60 refs/remotes/origin/clean_and_working
+1a465542bd9851ce98525014620d9f42fa0182ab refs/remotes/origin/daelan
+cf57c3b1c0a363c12bdef36c58d296b54e5105d0 refs/remotes/origin/devesh
+3c75349ee2370f452fea70d468845ff073bc5916 refs/remotes/origin/james
+d8bbb294e8ff9d8d5b96295b9c19968dbc043578 refs/remotes/origin/jci_tuning_daelan
+738a91ce4ec567aba149412e69268d37a489366e refs/remotes/origin/kevin
+4e24ec0c8a4982e4633413af7d8bc07ccba8ecc6 refs/remotes/origin/master

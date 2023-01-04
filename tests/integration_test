@@ -1,0 +1,329 @@
+#!/usr/bin/env python
+from pickle import PickleBuffer
+import unittest
+import balance_board
+import time
+import rospy
+from balance_board.srv import Gains, Trajectory, TrajectoryRequest
+from balance_board.msg import BoardPose, Ball_pose, RobotState
+from rospy.exceptions import ROSException
+from std_srvs.srv import Empty, EmptyRequest
+from std_msgs.msg import Float64MultiArray
+from board_pid import BoardPid
+from math import pi
+from sensor_msgs.msg import JointState
+
+
+class BalanceServTests(unittest.TestCase):
+
+    # Tests for ros_control_interface ###########################################################
+
+    def test_enable(self):
+        """ Testing RCI enable service
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+        time.sleep(1)
+        state = rospy.wait_for_message('rci_state', RobotState)
+        self.assertEqual(state.state, True)
+
+    def test_disable(self):
+        """ Testing RCI disabe service
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+        rospy.wait_for_service('stop', timeout=None)
+        disable = rospy.ServiceProxy("stop", Empty)
+        ec = disable(EmptyRequest())
+        time.sleep(1)
+        state = rospy.wait_for_message('rci_state', RobotState)
+        self.assertEqual(state.state, False)
+
+    def test_home(self):
+        """ Testing that RCI stored home position is accurate
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+
+        self.angle_update = rospy.Publisher("angle_updates", BoardPose)
+        new_angle = BoardPose()
+        new_angle.theta_x = 0
+        new_angle.theta_y = 0
+        self.angle_update.publish(new_angle)
+        time.sleep(1)
+        state = rospy.wait_for_message('pos_control/command', Float64MultiArray)
+        self.assertEqual(state.data, (0, -pi/2, pi/2, -pi/2, -pi/2, pi/2, pi/4))
+
+    def test_new_angle(self):
+        """ Testing that RCI sends new angles
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+
+        self.angle_update = rospy.Publisher("angle_updates", BoardPose)
+        new_angle = BoardPose()
+        new_angle.theta_x = 0.5
+        new_angle.theta_y = 0.5
+        self.angle_update.publish(new_angle)
+        time.sleep(1)
+        state = rospy.wait_for_message('pos_control/command', Float64MultiArray)
+        self.assertEqual(state.data, (0.0, -pi/2, pi/2, -pi/2, -pi/2+0.5, pi/2+0.5, pi/4))
+
+    def test_pos_lims(self):
+        """ Testing that RCI respectes positive joint limits
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+
+        self.angle_update = rospy.Publisher("angle_updates", BoardPose)
+        new_angle = BoardPose()
+        new_angle.theta_x = 3
+        new_angle.theta_y = 3
+        self.angle_update.publish(new_angle)
+        time.sleep(1)
+        state = rospy.wait_for_message('pos_control/command', Float64MultiArray)
+        a = (0.0, -pi/2, pi/2, -pi/2, -pi/2+pi/4, pi/2+pi/4, pi/4)
+        for i in range(len(a)):
+            self.assertAlmostEqual(state.data[i], a[i], delta=0.001)
+
+    def test_neg_lims(self):
+        """ Testing that RCI respects negative joint limits
+        """
+        rospy.wait_for_service('start', timeout=None)
+        enable = rospy.ServiceProxy("start", Empty)
+        ec = enable(EmptyRequest())
+        
+        self.angle_update = rospy.Publisher("angle_updates", BoardPose)
+        new_angle = BoardPose()
+        new_angle.theta_x = -3
+        new_angle.theta_y = -3
+        self.angle_update.publish(new_angle)
+        time.sleep(1)
+        state = rospy.wait_for_message('pos_control/command', Float64MultiArray)
+        a = (0.0, -pi/2, pi/2, -pi/2, -pi/2-pi/4, pi/2-pi/4, pi/4)
+        for i in range(len(a)):
+            self.assertAlmostEqual(state.data[i], a[i], delta=0.001)
+
+
+    # Tests for pd_controller ####################################################################
+
+    def test_pd_controller_set_gains(self):
+        """ Testing that PDC gains set properly
+        """
+        rospy.wait_for_service('set_gains', timeout=None)
+        set_gains = rospy.ServiceProxy("set_gains", Gains)
+        ec = set_gains(kp=0.001, ki= 0, kd=0.001)
+        self.assertEquals(ec.reply, 0.0)
+    
+    def test_pd_controller_proportional(self):
+        """ Testing that PD proportional control works
+        """
+        rospy.wait_for_service('start', timeout=None)
+        start = rospy.ServiceProxy("start", Empty)
+        start.call(EmptyRequest())
+
+        rospy.wait_for_service('set_gains', timeout=None)
+        set_gains = rospy.ServiceProxy("set_gains", Gains)
+        ec = set_gains(kp=1, ki=0, kd=0)
+        self.assertEquals(ec.reply, 0.0)
+        
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [-50]
+        traj.y_list = [-50]
+        reply = new_traj.call(traj)
+
+        time.sleep(1)
+
+        bg = Ball_pose()
+        bg.x = 1 
+        bg.y = 1
+        ball_pub = rospy.Publisher("ball_pose", Ball_pose)
+        listener = rospy.Subscriber("angle_updates", BoardPose, self.listen_cb)
+
+        ball_pub.publish(bg)
+        time.sleep(1)
+
+        self.assertEqual(self.theta_x, -1.0)
+        self.assertEqual(self.theta_y, 1.0)
+
+    def test_pd_controller_derivative(self):
+        """ Testing that PD deriative control works
+        """
+        rospy.wait_for_service('start', timeout=None)
+        start = rospy.ServiceProxy("start", Empty)
+        start.call(EmptyRequest())
+
+        rospy.wait_for_service('set_gains', timeout=None)
+        set_gains = rospy.ServiceProxy("set_gains", Gains)
+        ec = set_gains(kp=0, ki=0, kd=1)
+        self.assertEquals(ec.reply, 0.0)
+        
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [-50]
+        traj.y_list = [-50]
+        reply = new_traj.call(traj)
+
+        time.sleep(1)
+
+        bg = Ball_pose()
+        bg.x = 0 
+        bg.y = 0
+        ball_pub = rospy.Publisher("ball_pose", Ball_pose)
+        listener = rospy.Subscriber("angle_updates", BoardPose, self.listen_cb)
+
+        ball_pub.publish(bg)
+        bg.x = 1
+        bg.y = 1
+        time.sleep(1)
+        ball_pub.publish(bg)
+        time.sleep(1)
+
+        self.assertAlmostEqual(self.theta_x, -1.0, delta=0.01)
+        self.assertAlmostEqual(self.theta_y, 1.0, delta=0.01)
+
+    def test_pd_controller_converged(self):
+        """ Testing that PD control converges
+        """
+        rospy.wait_for_service('start', timeout=None)
+        start = rospy.ServiceProxy("start", Empty)
+        start.call(EmptyRequest())
+
+        rospy.wait_for_service('set_gains', timeout=None)
+        set_gains = rospy.ServiceProxy("set_gains", Gains)
+        ec = set_gains(kp=1, ki=0, kd=1)
+        self.assertEquals(ec.reply, 0.0)
+        
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [-50]
+        traj.y_list = [-50]
+        reply = new_traj.call(traj)
+
+        time.sleep(1)
+
+        bg = Ball_pose()
+        bg.x = 0 
+        bg.y = 0
+        ball_pub = rospy.Publisher("ball_pose", Ball_pose)
+        listener = rospy.Subscriber("angle_updates", BoardPose, self.listen_cb)
+
+        ball_pub.publish(bg)
+        time.sleep(1)
+        ball_pub.publish(bg)
+        time.sleep(1)
+
+        self.assertEqual(self.theta_x, 0.0)
+        self.assertEqual(self.theta_y, 0.0)
+
+
+    # tests for trajectory_manager ###############################################################
+
+    def test_traj_manager_good_traj(self):
+        """ Testing that TrajMgr accepts good trajectories
+        """
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = False
+        traj.repeat = False
+        traj.rate = 0
+        traj.x_list = [0, 1, 2]
+        traj.y_list = [0, 1, 2]
+        reply = new_traj.call(traj)
+        self.assertEquals(reply.ok, True)
+
+    def test_traj_manager_bad_traj(self):
+        """ Testing that TrajMgr rejects bad trajectories
+        """
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = False
+        traj.repeat = False
+        traj.rate = 0
+        traj.x_list = [0, 1]
+        traj.y_list = [0, 1, 2]
+        reply = new_traj.call(traj)
+        self.assertEquals(reply.ok, False)
+
+    def test_traj_manager_disable(self):
+        """ Testing that TrajMgr doesn't send new trajectories while robot is disabled
+        """
+        rospy.wait_for_service('stop', timeout=None)
+        start = rospy.ServiceProxy("stop", Empty)
+        start.call(EmptyRequest())
+
+        target = rospy.wait_for_message("target", Ball_pose)
+
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [target.x_way + 100]
+        traj.y_list = [target.y_way + 100]
+        reply = new_traj.call(traj)
+        self.assertEqual(reply.ok, True)
+        n_target = rospy.wait_for_message("target", Ball_pose)
+        self.assertEquals(target.x_way, n_target.x_way)
+        self.assertEquals(target.y_way, n_target.y_way)
+
+    def test_traj_manager_enable_singleton_trajectory(self):
+        """ Testing that TrajMgr propagates new trajectoresi properly while enabled
+        """
+        rospy.wait_for_service('start', timeout=None)
+        start = rospy.ServiceProxy("start", Empty)
+        start.call(EmptyRequest())
+        
+        rospy.wait_for_service('new_trajectory', timeout=None)
+        new_traj = rospy.ServiceProxy("new_trajectory", Trajectory)
+        traj = TrajectoryRequest()
+        traj.clear_queue = True
+        traj.repeat = False
+        traj.rate = 100
+        traj.x_list = [4]
+        traj.y_list = [5]
+        reply = new_traj.call(traj)
+        self.assertEqual(reply.ok, True)
+        time.sleep(1)
+        target = rospy.wait_for_message("target", Ball_pose)
+        self.assertEquals(target.x_way, 54.0)
+        self.assertEquals(target.y_way, 55.0)
+
+    def listen_cb(self, msg):
+        self.theta_x = msg.theta_x
+        self.theta_y = msg.theta_y
+
+    def angle_cb(self, msg):
+        self.cur_theta_x = msg.theta_x
+        self.cur_theta_y = msg.theta_y
+
+    def vel_cb(self, msg):
+        self.cur_vel_x = msg.theta_x
+        self.cur_vel_y = msg.theta_y
+
+if __name__== "__main__":
+    import rostest
+
+    rospy.init_node("integration_test")
+    rostest.rosrun(balance_board, 'balance_serv_tests', BalanceServTests)

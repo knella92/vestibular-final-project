@@ -1,0 +1,32 @@
+
+#Publish all joint states -----------------------------------
+joint_state_controller:
+  type: joint_state_controller/JointStateController
+  publish_rate: 50  
+
+# Position Controllers ---------------------------------------
+
+pos_control:
+  type: effort_controllers/JointGroupPositionController
+  joints:
+    - panda_joint1
+    - panda_joint2
+    - panda_joint3
+    - panda_joint4
+    - panda_joint5
+    - panda_joint6
+    - panda_joint7
+  panda_joint1: 
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  panda_joint2: 
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  panda_joint3: 
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  panda_joint4: 
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  panda_joint5: 
+    pid: {p: 100, i: 0.01, d: 10}
+  panda_joint6: 
+    pid: {p: 100, i: 0.01, d: 10}
+  panda_joint7: 
+    pid: {p: 5.0, i: 0.01, d: 10.0}

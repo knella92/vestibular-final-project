@@ -1,0 +1,7 @@
+# params for the PD controller
+kp: 0.001 # proportional gain
+ki: 0 # integral gain
+kd: 0.001 # derivative gain
+derivative_smoothing: 1 # how many sensor values to average for derivative error smoothing
+
+ 

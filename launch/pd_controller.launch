@@ -1,0 +1,9 @@
+<launch>
+    <arg name="launch_vision" default="true"/>
+    <include file="$(find balance_board)/launch/ros_control_interface.launch">
+    </include>
+    <node name="pd_controller" pkg="balance_board" type="pd_controller">
+        <rosparam command="load" file="$(find balance_board)/config/pd_params.yaml"/>
+    </node>
+    <node if="$(arg launch_vision)" name="vision" pkg="balance_board" type="vision"/>
+</launch>
