@@ -15,7 +15,7 @@ The project integrates two main portions. First part is the perception: we use r
 
 Team members:
 
-Devesh Bhura, Davin Landry, Kevin Nella, Daelan Roosa, Haozhi Zhang
+Kevin Nella, Devesh Bhura, Davin Landry, Daelan Roosa, Haozhi Zhang
 
 ### Video Demo
 
